@@ -34,6 +34,17 @@ type Http_server struct {
 }
 type Color string
 
+type key int
+
+const (
+	requestIDKey key = 0
+)
+
+var (
+	listenAddr string
+	healthy    int32
+)
+
 const (
 	ColorBlack  = "\u001b[30m"
 	ColorRed    = "\u001b[31m"
@@ -56,14 +67,25 @@ func GetOutboundIP() net.IP {
 	localAddr := conn.LocalAddr().(*net.UDPAddr)
 	return localAddr.IP
 }
+
+var iso_path string
+var name string
+var port string
+var ks bool
+
 func main() {
-	var iso_path string
-	var name string
-	var port string
+
 	flag.StringVar(&port, "port", "8081", "port")
 	flag.StringVar(&iso_path, "iso", "", "full path to vmware installer media")
 	flag.StringVar(&name, "name", "", "Extract name of ISO content to http dir")
+	flag.BoolVar(&ks, "ks", false, "set kernalopts to kickstart file")
 	flag.Parse()
+	ks_sample := []string{
+		"vmaccepteula",
+		"rootpw !PassW0rd",
+		"install --firstdisk --overwritevmfs",
+		"network --bootproto=dhcp --device=vmnic0",
+	}
 
 	colorize(ColorGreen, iso_path)
 
@@ -77,12 +99,13 @@ func main() {
 		Port:    ":" + port,
 		Address: GetOutboundIP().String(),
 	}
-	fmt.Println("Running webserver on:", GetOutboundIP().String(), http_server.Port)
+	writeKsSample(ks_sample, image.Root_Path+"/ks/ks.cfg")
+	fmt.Println("Running webserver on:", GetOutboundIP().String()+http_server.Port+"\n")
 	CreateDirIfNotExist((filepath.Join(image.Root_Path, image.Extract_Path)))
 	CreateDirIfNotExist((filepath.Join(image.Root_Path, "/ks")))
 	extractISO(image.ISO_Path, (filepath.Join(image.Root_Path, image.Extract_Path, image.Extract_Name)))
 	CopyBootCFG((filepath.Join(image.Root_Path, image.Extract_Path, image.Extract_Name)), image.Root_Path)
-	formatBootCFG(image.Root_Path+"/boot.cfg", http_server.Address+http_server.Port+"/"+image.Extract_Path+"/"+image.Extract_Name, "runweasel", "Loading ESXi installer from HTTP Server")
+	formatBootCFG(image.Root_Path+"/boot.cfg", http_server.Address+http_server.Port+"/"+image.Extract_Path+"/"+image.Extract_Name, "runweasel", "Loading ESXi installer from HTTP Server", http_server)
 	CopyEFIBootFile((filepath.Join(image.Root_Path, image.Extract_Path, image.Extract_Name)), image.Root_Path)
 	nextRequestID := func() string {
 		return fmt.Sprintf("%d", time.Now().UnixNano())
@@ -144,8 +167,30 @@ func CreateDirIfNotExist(dir string) {
 	}
 }
 
-func extractISO(source_path string, output_path string) {
+func writeKsSample(ks_sample []string, output_path string) {
+	if _, err := os.Stat(output_path); err == nil {
+		colorize(ColorYellow, "kickstart example file exists\n")
+	} else {
+		file, err := os.OpenFile(output_path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 
+		if err != nil {
+			log.Fatalf("failed creating file: %s", err)
+		}
+
+		datawriter := bufio.NewWriter(file)
+
+		for _, data := range ks_sample {
+			_, _ = datawriter.WriteString(data + "\n")
+		}
+
+		datawriter.Flush()
+		file.Close()
+	}
+
+}
+
+func extractISO(source_path string, output_path string) {
+	colorize(ColorGreen, "Extract ISO")
 	f, err := os.Open(source_path)
 	if err != nil {
 		log.Fatalf("failed to open file: %s", err)
@@ -158,7 +203,10 @@ func extractISO(source_path string, output_path string) {
 
 }
 
-func formatBootCFG(source_path string, prefix string, kernelopt string, title string) {
+func formatBootCFG(source_path string, prefix string, kernelopt string, title string, http_server Http_server) {
+
+	colorize(ColorGreen, "Configure boot.cfg file")
+
 	file, err := os.Open(source_path)
 	if err != nil {
 		fmt.Println(err)
@@ -172,17 +220,26 @@ func formatBootCFG(source_path string, prefix string, kernelopt string, title st
 		line := scanner.Text()
 		line = strings.ReplaceAll(line, "/", "")
 		if strings.HasPrefix(line, "prefix=") {
+			fmt.Println("Setting prefix to:", prefix)
 			line = fmt.Sprintf("%s%s", line, "http://"+prefix)
 		}
 		if strings.HasPrefix(line, "kernelopt=") {
 			parts := strings.Split(line, "=")
 			if len(parts) > 1 {
-				line = fmt.Sprintf("%s=%s", parts[0], kernelopt)
+				if ks == true {
+					fmt.Println("Setting kernelopt to:", "ks=http://"+http_server.Address+http_server.Port+"/ks/ks.cfg")
+					line = fmt.Sprintf("%s=%s", parts[0], "ks=http://"+http_server.Address+http_server.Port+"/ks/ks.cfg")
+				} else {
+					fmt.Println("Setting kernelopt to:", kernelopt)
+					line = fmt.Sprintf("%s=%s", parts[0], kernelopt)
+				}
+
 			}
 		}
 		if strings.HasPrefix(line, "title=") {
 			parts := strings.Split(line, "=")
 			if len(parts) > 1 {
+				fmt.Println("Setting title to:", title)
 				line = fmt.Sprintf("%s=%s", parts[0], title)
 			}
 		}
@@ -250,17 +307,6 @@ func CopyBootCFG(source_path string, output_path string) {
 		panic(err)
 	}
 }
-
-type key int
-
-const (
-	requestIDKey key = 0
-)
-
-var (
-	listenAddr string
-	healthy    int32
-)
 
 func healthz() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
