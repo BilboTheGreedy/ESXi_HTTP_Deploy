@@ -1,4 +1,4 @@
-# ESXi_HTTP_Deploy
+# ESXi HTTP Deploy (UEFI HTTP BOOT)
 
 ESXi HTTP Deploy is a simple utility to extract the contents of ESXi install iso media and make the nessesary modifications to enable UEFI HTTP boot on hardware. It will run its own web server on specified port. 
 
